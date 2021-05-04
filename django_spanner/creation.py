@@ -34,7 +34,7 @@ class DatabaseCreation(BaseDatabaseCreation):
                     skip("unsupported by Spanner")(method),
                 )
 
-    def create_test_db(self, *args, **kwargs):
+    def create_test_db(self, verbosity=1, autoclobber=False, serialize=True, keepdb=False):
         """Create a test database.
 
         :rtype: str
@@ -44,7 +44,39 @@ class DatabaseCreation(BaseDatabaseCreation):
         # by a developer running the tests locally.
         if os.environ.get("RUNNING_SPANNER_BACKEND_TESTS") == "1":
             self.mark_skips()
-        super().create_test_db(*args, **kwargs)
+        from django.core.management import call_command
+
+        test_database_name = self._get_test_db_name()
+
+        if verbosity >= 1:
+            action = 'Creating'
+            if keepdb:
+                action = "Using existing"
+
+            self.log('%s test database for alias %s...' % (
+                action,
+                self._get_database_display_str(verbosity, test_database_name),
+            ))
+
+        # We could skip this call if keepdb is True, but we instead
+        # give it the keepdb param. This is to handle the case
+        # where the test DB doesn't exist, in which case we need to
+        # create it, then just not destroy it. If we instead skip
+        # this, we will get an exception.
+        self._create_test_db(verbosity, autoclobber, keepdb)
+        self.connection.close()
+        settings.DATABASES[self.connection.alias]["NAME"] = test_database_name
+        self.connection.settings_dict["NAME"] = test_database_name
+        # We then serialize the current state of the database into a string
+        # and store it on the connection. This slightly horrific process is so people
+        # who are testing on databases without transactions or who are using
+        # a TransactionTestCase still get a clean database on every test run.
+        if serialize:
+            self.connection._test_serialized_contents = self.serialize_db_to_string()
+        call_command('createcachetable', database=self.connection.alias)
+        # Ensure a connection for the side effect of initializing the test database.
+        self.connection.ensure_connection()
+        return test_database_name
 
     def _create_test_db(self, verbosity, autoclobber, keepdb=False):
         """
